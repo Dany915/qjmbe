@@ -127,11 +127,23 @@ const actualizarFactura = async (req, res) => {
     return res.status(400).json({ errors: errors.array() });
 
   try {
-    // Prevent manually changing estado through this endpoint
+    const factura = await Factura.findById(req.params.id);
+    if (!factura) return res.status(404).json({ message: 'Factura no encontrada' });
+
+    if (factura.estado !== 'por_aprobar' || factura.anulado)
+      return res.status(403).json({
+        message: 'Solo se pueden editar facturas en estado "por_aprobar" que no estén anuladas',
+      });
+
+    // Campos protegidos — nunca modificables por esta ruta
+    delete req.body.numeroRecibo;
     delete req.body.estado;
     delete req.body.creadoPor;
     delete req.body.aprobadoPor;
     delete req.body.aprobadoEn;
+    delete req.body.anulado;
+    delete req.body.anuladoPor;
+    delete req.body.anuladoEn;
 
     if (req.body.casa) {
       const casaExiste = await Casa.findById(req.body.casa);
@@ -139,21 +151,34 @@ const actualizarFactura = async (req, res) => {
         return res.status(404).json({ message: 'La casa especificada no existe' });
     }
 
-    const factura = await Factura.findByIdAndUpdate(req.params.id, req.body, {
+    const actualizada = await Factura.findByIdAndUpdate(req.params.id, req.body, {
       new: true,
       runValidators: true,
     }).populate(populate);
 
-    if (!factura) return res.status(404).json({ message: 'Factura no encontrada' });
-
-    return res.json({ message: 'Factura actualizada exitosamente', factura });
+    return res.json({ message: 'Factura actualizada exitosamente', factura: actualizada });
   } catch (error) {
-    if (error.code === 11000)
-      return res.status(409).json({ message: 'El número de recibo ya existe' });
     return res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
 
+
+const eliminarFactura = async (req, res) => {
+  try {
+    const factura = await Factura.findById(req.params.id);
+    if (!factura) return res.status(404).json({ message: 'Factura no encontrada' });
+
+    if (factura.estado !== 'por_aprobar' || factura.anulado)
+      return res.status(403).json({
+        message: 'Solo se pueden eliminar facturas en estado "por_aprobar" que no estén anuladas',
+      });
+
+    await factura.deleteOne();
+    return res.json({ message: 'Factura eliminada exitosamente' });
+  } catch (error) {
+    return res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
 
 const aprobarFactura = async (req, res) => {
   try {
@@ -387,6 +412,7 @@ module.exports = {
   crearFactura,
   crearFacturasEnLote,
   actualizarFactura,
+  eliminarFactura,
   aprobarFactura,
   rechazarFactura,
   anularFactura,
