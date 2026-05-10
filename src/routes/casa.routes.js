@@ -41,4 +41,3 @@ router.patch('/:id/desactivar', ...adminOnly, desactivarCasa);
 router.patch('/:id/activar', ...adminOnly, activarCasa);
 
 module.exports = router;
-
