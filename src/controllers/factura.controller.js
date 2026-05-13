@@ -197,6 +197,14 @@ const eliminarFactura = async (req, res) => {
         message: 'Solo se pueden eliminar facturas en estado "por_aprobar" que no estén anuladas',
       });
 
+    // Release linked cargos so they can be used in a new factura
+    if (factura.cargos?.length) {
+      await Cargo.updateMany(
+        { _id: { $in: factura.cargos } },
+        { $set: { factura: null } }
+      );
+    }
+
     await factura.deleteOne();
     return res.json({ message: 'Factura eliminada exitosamente' });
   } catch (error) {

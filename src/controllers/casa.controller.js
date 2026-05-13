@@ -12,10 +12,17 @@ const listarCasas = async (req, res) => {
     const skip = (Number(page) - 1) * Number(limit);
 
     const [casas, total] = await Promise.all([
-      Casa.find(filter)
-        .sort({ bloque: 1, numeroCasa: 1 })
-        .skip(skip)
-        .limit(Number(limit)),
+      Casa.aggregate([
+        { $match: filter },
+        { $addFields: {
+          numeroCasaInt: { $toInt: '$numeroCasa' },
+          codigo: { $concat: ['$bloque', '$numeroCasa'] },
+        }},
+        { $sort: { bloque: 1, numeroCasaInt: 1 } },
+        { $skip: skip },
+        { $limit: Number(limit) },
+        { $unset: 'numeroCasaInt' },
+      ]),
       Casa.countDocuments(filter),
     ]);
 

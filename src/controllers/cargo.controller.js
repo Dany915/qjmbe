@@ -153,10 +153,12 @@ const aplicarMora = async (req, res) => {
     if (!tarifa)
       return res.status(404).json({ message: `No existe tarifa para el anio ${anio}` });
 
+    // Exclude cargos already linked to a factura (payment submitted but pending approval)
     const cargosPendientes = await Cargo.find({
       tipo: 'administracion',
       periodo,
       estado: 'pendiente',
+      factura: null,
     });
 
     let aplicadas = 0;
