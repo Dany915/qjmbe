@@ -32,8 +32,8 @@ const casaUpdateRules = [
   body('correo').optional({ nullable: true }).isEmail().withMessage('Correo inválido').normalizeEmail(),
 ];
 
-router.get('/', ...adminOnly, listarCasas);
-router.get('/:id', ...adminOnly, obtenerCasa);
+router.get('/', authenticate, requireRole('admin', 'user'), listarCasas);
+router.get('/:id', authenticate, requireRole('admin', 'user'), obtenerCasa);
 router.post('/', ...adminOnly, casaRules, crearCasa);
 router.post('/bulk', ...adminOnly, crearCasasEnLote);
 router.put('/:id', ...adminOnly, casaUpdateRules, actualizarCasa);

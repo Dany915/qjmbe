@@ -47,6 +47,10 @@ const casaSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    parqueadero: {
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } }
 );

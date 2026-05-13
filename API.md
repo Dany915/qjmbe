@@ -21,7 +21,7 @@ Todos los endpoints protegidos requieren el header:
 Authorization: Bearer <token>
 ```
 
-El token se obtiene al hacer login exitoso (`/api/auth/login` o `/api/auth/google`).
+El token se obtiene al hacer login exitoso. La duración se configura con `JWT_EXPIRES_IN` en el `.env` (ej: `7d`, `8h`, `30m`).
 
 ---
 
@@ -30,8 +30,8 @@ El token se obtiene al hacer login exitoso (`/api/auth/login` o `/api/auth/googl
 ### Roles
 | Rol | Descripción |
 |-----|-------------|
-| `user` | Rol por defecto. Puede crear facturas y listarlas. |
-| `admin` | Acceso total. Gestiona usuarios, casas y facturas. |
+| `user` | Rol por defecto. Puede crear facturas y consultar su estado de cuenta. |
+| `admin` | Acceso total. Gestiona usuarios, casas, tarifas, cargos y facturas. |
 
 ### Estados de cuenta (usuario)
 | Estado | Descripción |
@@ -44,73 +44,23 @@ El token se obtiene al hacer login exitoso (`/api/auth/login` o `/api/auth/googl
 
 ---
 
-## Modelos
+## Códigos de error comunes
 
-### User
-```
-_id           String (ObjectId)
-name          String  — requerido
-email         String  — único, requerido
-password      String  — solo para authProvider "local"
-avatar        String  — URL de foto (viene de Google)
-role          "user" | "admin"         — default: "user"
-status        "pending" | "active" | "suspended"  — default: "pending"
-authProvider  "local" | "google"       — default: "local"
-activatedBy   ObjectId → User          — quién activó la cuenta
-activatedAt   Date                     — cuándo fue activada
-createdAt     Date
-updatedAt     Date
-```
-
-### Casa
-```
-_id                 String (ObjectId)
-bloque              String  — requerido
-numeroCasa          String  — requerido
-codigo              String  — virtual: bloque + numeroCasa (ej: "G12"), solo lectura
-propietario         String  — requerido
-tipoDocumento       String  — requerido (ej: "CC", "NIT", "CE")
-numeroDocumento     String  — requerido
-contactoPropietario String  — opcional
-correo              String  — opcional
-direccion           String  — opcional
-activa              Boolean — default: true
-createdAt           Date
-updatedAt           Date
-```
-> `bloque` + `numeroCasa` son únicos en conjunto. No pueden existir dos casas con el mismo bloque y número.
-> Las casas nunca se borran físicamente. Al "eliminar" una casa se desactiva (`activa: false`) para preservar el historial de facturas.
-
-### Factura
-```
-_id            String (ObjectId)
-numeroRecibo   String  — único, requerido
-valor          Number  — requerido, >= 0
-fecha          Date    — requerido (ISO 8601: "YYYY-MM-DD")
-casa           ObjectId → Casa   — requerido
-descripcion    String  — requerido (ej: "Administración mayo 2026")
-nombrePagador  String  — requerido
-metodoPago     "efectivo" | "digital"    — requerido
-estado         "por_aprobar" | "aprobado" | "rechazado"  — default: "por_aprobar"
-creadoPor      ObjectId → User   — se asigna automáticamente del token JWT
-aprobadoPor    ObjectId → User   — lo asigna el admin al aprobar
-aprobadoEn     Date              — lo asigna el admin al aprobar
-anulado        Boolean           — default: false
-anuladoPor     ObjectId → User   — lo asigna el admin al anular
-anuladoEn      Date              — lo asigna el admin al anular
-createdAt      Date
-updatedAt      Date
-```
-> El campo `estado` no puede modificarse directamente con PUT. Solo cambia mediante los endpoints `/aprobar` y `/rechazar`.
+| Código | Significado |
+|--------|-------------|
+| `400` | Datos inválidos o faltantes en el body |
+| `401` | Token ausente, inválido o expirado |
+| `403` | Sin permisos (rol insuficiente, cuenta inactiva, o recurso inmutable) |
+| `404` | Recurso no encontrado |
+| `409` | Conflicto — registro duplicado |
+| `500` | Error interno del servidor |
 
 ---
 
-## Endpoints
+## Auth — `/api/auth`
 
-### Auth — `/api/auth`
-
-#### POST `/api/auth/register`
-Registra un nuevo usuario. La cuenta queda en `status: "pending"` y no puede iniciar sesión hasta que un admin la active.
+### POST `/api/auth/register`
+Registra una cuenta local. Queda en `status: "pending"` hasta que un admin la active.
 
 **Auth requerida:** No
 
@@ -123,17 +73,13 @@ Registra un nuevo usuario. La cuenta queda en `status: "pending"` y no puede ini
 }
 ```
 
-**Respuesta 201:**
-```json
-{
-  "message": "Account created successfully. Wait for an admin to activate your account before logging in.",
-  "user": { ...userData }
-}
-```
+**Respuestas**
+- `201` — cuenta creada, espera activación
+- `409` — email ya registrado
 
 ---
 
-#### POST `/api/auth/login`
+### POST `/api/auth/login`
 Inicia sesión con email y contraseña. Solo funciona si `status: "active"`.
 
 **Auth requerida:** No
@@ -146,26 +92,15 @@ Inicia sesión con email y contraseña. Solo funciona si `status: "active"`.
 }
 ```
 
-**Respuesta 200:**
-```json
-{
-  "token": "<JWT>",
-  "user": { ...userData }
-}
-```
-
-**Respuesta 403** (cuenta no activa):
-```json
-{
-  "message": "Account not active. Contact an administrator to activate your account.",
-  "status": "pending"
-}
-```
+**Respuestas**
+- `200` — `{ token, user }`
+- `401` — credenciales inválidas
+- `403` — cuenta no activa (`{ message, status }`)
 
 ---
 
-#### POST `/api/auth/google`
-Inicia sesión o registra un usuario con Google. Recibe el `idToken` obtenido desde el SDK de Google Sign-In en Android.
+### POST `/api/auth/google`
+Inicia sesión con Google (Android). Envía el `idToken` obtenido del SDK de Google Sign-In. Guarda el avatar del perfil de Google automáticamente.
 
 **Auth requerida:** No
 
@@ -176,167 +111,83 @@ Inicia sesión o registra un usuario con Google. Recibe el `idToken` obtenido de
 }
 ```
 
-**Respuesta 200** (login exitoso):
-```json
-{
-  "token": "<JWT>",
-  "user": { ...userData }
-}
-```
-
-**Respuesta 201** (cuenta nueva creada, queda pendiente):
-```json
-{
-  "message": "Account created. Wait for an admin to activate it before logging in.",
-  "user": { ...userData }
-}
-```
-
-**Respuesta 403** (cuenta no activa):
-```json
-{
-  "message": "Account not active. Contact an administrator.",
-  "status": "pending"
-}
-```
+**Respuestas**
+- `200` — `{ token, user }` — cuenta existente y activa
+- `201` — cuenta creada, espera activación del admin
+- `403` — cuenta no activa
+- `401` — token de Google inválido
 
 ---
 
-#### GET `/api/auth/me`
+### GET `/api/auth/me` 🔒
 Retorna los datos del usuario autenticado.
 
-**Auth requerida:** Sí (cualquier rol activo)
-
-**Respuesta 200:**
-```json
-{
-  "user": { ...userData }
-}
-```
+**Respuesta `200`:** `{ user }`
 
 ---
 
-### Usuarios — `/api/users` _(solo admin)_
+## Usuarios — `/api/users` 🔒 Admin
 
-#### GET `/api/users`
-Lista todos los usuarios con paginación y filtros opcionales.
+### GET `/api/users`
+Lista todos los usuarios con paginación.
 
-**Query params:**
-| Param | Valores | Descripción |
-|-------|---------|-------------|
-| `status` | `pending` \| `active` \| `suspended` | Filtrar por estado |
-| `role` | `user` \| `admin` | Filtrar por rol |
-| `page` | número | Página (default: 1) |
-| `limit` | número | Resultados por página (default: 20) |
+**Query params:** `status`, `role`, `page` (default: 1), `limit` (default: 20)
 
-**Respuesta 200:**
-```json
-{
-  "total": 50,
-  "page": 1,
-  "pages": 3,
-  "users": [ ...userData ]
-}
-```
+**Respuesta `200`:** `{ total, page, pages, users }`
 
 ---
 
-#### GET `/api/users/:id`
+### GET `/api/users/:id`
 Obtiene un usuario por ID.
 
-**Respuesta 200:**
-```json
-{
-  "user": { ...userData }
-}
-```
+**Respuesta `200`:** `{ user }`
 
 ---
 
-#### PATCH `/api/users/:id/activate`
-Activa la cuenta de un usuario (`status: "pending"` o `"suspended"` → `"active"`).
+### PATCH `/api/users/:id/activate`
+Activa una cuenta `pending` o `suspended`.
 
-**Respuesta 200:**
-```json
-{
-  "message": "User activated successfully",
-  "user": { ...userData }
-}
-```
+**Respuesta `200`:** `{ message, user }`
 
 ---
 
-#### PATCH `/api/users/:id/suspend`
-Suspende la cuenta de un usuario (`status` → `"suspended"`). No se puede suspender a uno mismo.
+### PATCH `/api/users/:id/suspend`
+Suspende una cuenta. No se puede suspender a uno mismo.
 
-**Respuesta 200:**
-```json
-{
-  "message": "User suspended successfully",
-  "user": { ...userData }
-}
-```
+**Respuesta `200`:** `{ message, user }`
 
 ---
 
-#### PATCH `/api/users/:id/role`
+### PATCH `/api/users/:id/role`
 Cambia el rol de un usuario. No se puede cambiar el propio rol.
 
-**Body:**
-```json
-{
-  "role": "admin"
-}
-```
+**Body:** `{ "role": "admin" }`
 
-**Respuesta 200:**
-```json
-{
-  "message": "Role updated successfully",
-  "user": { ...userData }
-}
-```
+**Respuesta `200`:** `{ message, user }`
 
 ---
 
-### Casas — `/api/casas` _(solo admin)_
+## Casas — `/api/casas` 🔒
 
-#### GET `/api/casas`
+### GET `/api/casas` — Admin + User
 Lista casas con paginación. Por defecto solo muestra casas activas.
 
-**Query params:**
-| Param | Valores | Descripción |
-|-------|---------|-------------|
-| `bloque` | String | Filtrar por bloque |
-| `activa` | `true` \| `false` | Default: `true`. Pasar `false` para ver casas desactivadas |
-| `page` | número | Página (default: 1) |
-| `limit` | número | Resultados por página (default: 20) |
+**Query params:** `bloque`, `activa` (default: `true`), `page`, `limit`
 
-**Respuesta 200:**
-```json
-{
-  "total": 100,
-  "page": 1,
-  "pages": 5,
-  "casas": [ ...casaData ]
-}
-```
+**Respuesta `200`:** `{ total, page, pages, casas }`
 
 ---
 
-#### GET `/api/casas/:id`
+### GET `/api/casas/:id` — Admin + User
 Obtiene una casa por ID.
 
-**Respuesta 200:**
-```json
-{
-  "casa": { ...casaData }
-}
-```
+**Respuesta `200`:** `{ casa }`
+
+El campo virtual `codigo` es solo lectura: concatena `bloque + numeroCasa` (ej: `"G12"`).
 
 ---
 
-#### POST `/api/casas`
+### POST `/api/casas` — Admin
 Crea una casa.
 
 **Body:**
@@ -349,340 +200,428 @@ Crea una casa.
   "numeroDocumento": "12345678",
   "contactoPropietario": "3001234567",
   "correo": "juan@email.com",
-  "direccion": "Calle 123"
+  "direccion": "Calle 123",
+  "parqueadero": false
 }
 ```
-> `contactoPropietario`, `correo` y `direccion` son opcionales.
 
-**Respuesta 201:**
-```json
-{
-  "message": "Casa creada exitosamente",
-  "casa": { ...casaData }
-}
-```
+> `contactoPropietario`, `correo`, `direccion` y `parqueadero` son opcionales. `parqueadero: true` indica que la casa tiene vehículo adicional y se le generará cargo mensual de parqueadero.
+
+**Respuestas**
+- `201` — `{ message, casa }`
+- `409` — bloque + numeroCasa ya existe
 
 ---
 
-#### POST `/api/casas/bulk`
-Crea múltiples casas en un solo request. Las duplicadas se omiten y se continúa con las demás.
+### POST `/api/casas/bulk` — Admin
+Crea múltiples casas en lote. Los duplicados se omiten.
+
+**Body:** `{ "casas": [ ...mismos campos que POST /casas... ] }`
+
+**Respuestas**
+- `201` — todas creadas
+- `207` — inserción parcial: `{ message, insertadas, duplicados }`
+
+---
+
+### PUT `/api/casas/:id` — Admin
+Actualiza una casa. Todos los campos son opcionales.
+
+**Respuesta `200`:** `{ message, casa }`
+
+---
+
+### PATCH `/api/casas/:id/desactivar` — Admin
+Desactiva una casa (soft delete). Las casas inactivas no reciben cargos mensuales.
+
+**Respuesta `200`:** `{ message, casa }`
+
+---
+
+### PATCH `/api/casas/:id/activar` — Admin
+Reactiva una casa previamente desactivada.
+
+**Respuesta `200`:** `{ message, casa }`
+
+---
+
+## Tarifas — `/api/tarifas` 🔒 Admin
+
+La tarifa define los valores vigentes para un año. Se crea como `provisional` (generalmente con el valor del año anterior) y se marca como `definitiva` cuando la junta aprueba el valor final. Al definirla, el sistema ajusta automáticamente los cargos pendientes y genera retroactivos para las casas que ya pagaron a la tarifa provisional.
+
+### GET `/api/tarifas`
+Lista todas las tarifas ordenadas por año descendente.
+
+**Respuesta `200`:** `{ tarifas }`
+
+---
+
+### GET `/api/tarifas/:año`
+Obtiene la tarifa de un año específico.
+
+**Ejemplo:** `GET /api/tarifas/2026` — el parámetro es el valor de `anio`
+
+**Respuesta `200`:** `{ tarifa }`
+
+---
+
+### POST `/api/tarifas`
+Crea la tarifa de un año. El estado inicia en `provisional`.
 
 **Body:**
 ```json
 {
-  "casas": [
-    {
-      "bloque": "A",
-      "numeroCasa": "101",
-      "propietario": "Juan Pérez",
-      "tipoDocumento": "CC",
-      "numeroDocumento": "12345678"
-    },
-    {
-      "bloque": "A",
-      "numeroCasa": "102",
-      "propietario": "María López",
-      "tipoDocumento": "CC",
-      "numeroDocumento": "87654321"
-    }
-  ]
+  "anio": 2026,
+  "cuotaAdministracion": 200000,
+  "multaMora": 10000,
+  "diasGracia": 10,
+  "parqueadero": 50000
 }
 ```
 
-**Respuesta 201** (todas insertadas):
+> `diasGracia` es el día del mes hasta el cual se puede pagar sin mora (default: 10). `parqueadero` es el cargo mensual para casas con vehículo adicional.
+
+**Respuestas**
+- `201` — `{ message, tarifa }`
+- `409` — ya existe tarifa para ese año
+
+---
+
+### PATCH `/api/tarifas/:id/definir`
+Marca la tarifa como `definitiva` con los valores finales aprobados por la junta.
+
+**Efectos automáticos:**
+- Cargos de administración **pendientes** vinculados a esta tarifa se actualizan al nuevo monto.
+- Cargos de administración **pagados** generan un cargo de tipo `retroactivo` por la diferencia por cada casa.
+
+**Body:**
 ```json
 {
-  "message": "2 casa(s) creada(s) exitosamente",
-  "casas": [ ...casaData ]
+  "cuotaAdministracion": 210000,
+  "multaMora": 10000,
+  "diasGracia": 10,
+  "parqueadero": 50000
 }
 ```
 
-**Respuesta 207** (inserción parcial con duplicados):
+> Solo `cuotaAdministracion` es obligatorio. Los demás campos son opcionales y solo se actualizan si se envían.
+
+**Respuesta `200`:**
 ```json
 {
-  "message": "1 casa(s) creada(s), 1 duplicada(s) omitida(s)",
-  "insertadas": [ ...casaData ],
-  "duplicados": [ ...casaData ]
+  "message": "Tarifa definida exitosamente",
+  "tarifa": { ... },
+  "retroactivosCreados": 45
+}
+```
+
+**Respuestas de error**
+- `400` — la tarifa ya está definida
+- `404` — tarifa no encontrada
+
+---
+
+## Cargos — `/api/cargos` 🔒
+
+Los cargos representan lo que cada casa debe pagar. Son la base del estado de cuenta y el requisito para crear facturas. Una factura solo puede crearse si la casa tiene cargos pendientes.
+
+**Tipos:** `administracion` | `mora` | `parqueadero` | `retroactivo` | `extraordinario`
+
+**Estados:** `pendiente` | `pagado` | `vencido`
+
+### Ciclo de vida de un cargo
+```
+pendiente → (factura creada) → pendiente con factura reservada
+         → (factura aprobada) → pagado
+         → (factura rechazada) → pendiente (liberado)
+         → (factura anulada) → pendiente (revertido)
+         → (mora aplicada) → vencido
+```
+
+---
+
+### GET `/api/cargos` — Admin
+Lista cargos con filtros opcionales y paginación.
+
+**Query params:** `casa`, `tipo`, `estado`, `periodo` (YYYY-MM), `page` (default: 1), `limit` (default: 20)
+
+**Respuesta `200`:** `{ total, page, pages, cargos }`
+
+---
+
+### GET `/api/cargos/casa/:casaId/estado-cuenta` — Admin + User
+Retorna el estado de cuenta completo de una casa agrupado por estado.
+
+**Respuesta `200`:**
+```json
+{
+  "casa": { ... },
+  "resumen": {
+    "totalPendiente": 210000,
+    "totalVencido": 10000,
+    "totalPagado": 840000,
+    "alDia": false
+  },
+  "cargos": {
+    "pendientes": [ ... ],
+    "vencidos": [ ... ],
+    "pagados": [ ... ]
+  }
+}
+```
+
+> `alDia: true` solo cuando no hay cargos pendientes ni vencidos.
+
+---
+
+### POST `/api/cargos/generar-mensual` — Admin
+Genera los cargos de administración y parqueadero para todas las casas activas de un mes. Si una casa ya tiene el cargo del mes se omite (idempotente).
+
+**Body:**
+```json
+{ "periodo": "2026-05" }
+```
+
+**Respuesta `201`:**
+```json
+{
+  "message": "Cargos generados para 2026-05",
+  "casas": 50,
+  "creados": 58,
+  "omitidos": 0
+}
+```
+
+> La fecha de vencimiento se calcula automáticamente con el `diasGracia` de la tarifa del año correspondiente.
+
+---
+
+### POST `/api/cargos/aplicar-mora` — Admin
+Aplica multa por mora a todas las casas con cargo de administración aún pendiente para el periodo indicado. Marca esos cargos de administración como `vencido`.
+
+Ejecutar después del día de gracia definido en la tarifa.
+
+**Body:**
+```json
+{ "periodo": "2026-05" }
+```
+
+**Respuesta `200`:**
+```json
+{
+  "message": "Mora aplicada para 2026-05",
+  "aplicadas": 8,
+  "omitidas": 2
+}
+```
+
+> `omitidas` son casas que ya tenían un cargo de mora para ese periodo.
+
+---
+
+### POST `/api/cargos/extraordinario` — Admin
+Crea una cuota extraordinaria para todas las casas activas (ej. pavimentación, mantenimiento urgente).
+
+**Body:**
+```json
+{
+  "descripcion": "Pavimentación zona común",
+  "monto": 150000,
+  "vencimiento": "2026-06-30"
+}
+```
+
+**Respuesta `201`:**
+```json
+{
+  "message": "Cuota extraordinaria creada para 50 casa(s)",
+  "casas": 50
 }
 ```
 
 ---
 
-#### PUT `/api/casas/:id`
-Actualiza una casa. Todos los campos son opcionales.
+## Facturas — `/api/facturas` 🔒
 
-**Body:** cualquier combinación de campos del modelo Casa.
+Las facturas registran los pagos físicos. Para crear una factura la casa debe tener cargos pendientes. La factura vincula los cargos que cubre, los reserva mientras está `por_aprobar`, y los marca como pagados al aprobarse.
 
-**Respuesta 200:**
-```json
-{
-  "message": "Casa actualizada exitosamente",
-  "casa": { ...casaData }
-}
-```
+**Estados:** `por_aprobar` | `aprobado` | `rechazado`
 
----
-
-#### PATCH `/api/casas/:id/desactivar`
-Desactiva una casa (soft delete). El documento se conserva en base de datos para mantener el historial de facturas.
-
-**Respuesta 200:**
-```json
-{
-  "message": "Casa desactivada exitosamente",
-  "casa": { ...casaData }
-}
-```
+### Reglas de edición y eliminación
+| Estado | ¿Editable? | ¿Eliminable? | ¿Quién? |
+|--------|-----------|-------------|---------|
+| `por_aprobar` + no anulada | Sí (excepto `numeroRecibo`) | Sí | Editar: user + admin / Eliminar: solo admin |
+| `aprobado` | No | No | — |
+| `rechazado` | No | No | — |
+| `anulado: true` | No | No | — |
 
 ---
 
-#### PATCH `/api/casas/:id/activar`
-Reactiva una casa previamente desactivada.
+### GET `/api/facturas` — Admin + User
+Lista facturas con filtros opcionales y paginación.
 
-**Respuesta 200:**
-```json
-{
-  "message": "Casa activada exitosamente",
-  "casa": { ...casaData }
-}
-```
+**Query params:** `estado`, `casa`, `page` (default: 1), `limit` (default: 20)
+
+**Respuesta `200`:** `{ total, page, pages, facturas }`
 
 ---
 
-### Facturas — `/api/facturas`
-
-#### GET `/api/facturas`
-Lista todas las facturas. Accesible por `user` y `admin`.
-
-**Query params:**
-| Param | Valores | Descripción |
-|-------|---------|-------------|
-| `estado` | `por_aprobar` \| `aprobado` \| `rechazado` | Filtrar por estado |
-| `casa` | ObjectId | Filtrar por casa |
-| `page` | número | Página (default: 1) |
-| `limit` | número | Resultados por página (default: 20) |
-
-**Respuesta 200:**
-```json
-{
-  "total": 80,
-  "page": 1,
-  "pages": 4,
-  "facturas": [
-    {
-      "_id": "...",
-      "numeroRecibo": "REC-001",
-      "valor": 150000,
-      "fecha": "2026-05-01T00:00:00.000Z",
-      "casa": {
-        "_id": "...",
-        "bloque": "G",
-        "numeroCasa": "12",
-        "codigo": "G12"
-      },
-      "descripcion": "Administración mayo 2026",
-      "nombrePagador": "Juan Pérez",
-      "estado": "por_aprobar",
-      "creadoPor": { "_id": "...", "name": "...", "email": "...", "role": "user" },
-      "aprobadoPor": null,
-      "aprobadoEn": null
-    }
-  ]
-}
-```
-
----
-
-#### GET `/api/facturas/buscar`
-Busca facturas aplicando filtros. Accesible por `user` y `admin`.
-
-**Reglas:**
-- `desde` es **obligatorio**
-- `bloque` o `codigo` son **obligatorios** (al menos uno). Si se envían los dos, `codigo` tiene prioridad.
-- Retorna todas las facturas desde `desde` hasta la fecha actual.
+### GET `/api/facturas/buscar` — Admin + User
+Busca facturas por rango de fechas y casa. `desde` y (`bloque` o `codigo`) son obligatorios.
 
 **Query params:**
 | Param | Tipo | Descripción |
 |-------|------|-------------|
-| `desde` | `YYYY-MM-DD` | **Obligatorio.** Fecha de inicio del rango |
+| `desde` | `YYYY-MM-DD` | **Obligatorio.** Fecha de inicio |
 | `bloque` | String | Busca todas las casas del bloque (ej: `G`) |
-| `codigo` | String | Busca la casa exacta por código (ej: `G12`) |
-| `page` | número | Página (default: 1) |
-| `limit` | número | Resultados por página (default: 20) |
+| `codigo` | String | Busca la casa exacta (ej: `G12`). Tiene prioridad sobre `bloque` |
+| `page` | número | Default: 1 |
+| `limit` | número | Default: 20 |
 
-**Ejemplos de uso:**
-```
-GET /api/facturas/buscar?desde=2026-01-01&codigo=G12
-GET /api/facturas/buscar?desde=2026-01-01&bloque=G
-GET /api/facturas/buscar?desde=2026-01-01&bloque=G&page=2
-```
+**Respuesta `200`:** `{ total, page, pages, facturas }`
 
-**Respuesta 200:**
-```json
-{
-  "total": 12,
-  "page": 1,
-  "pages": 1,
-  "facturas": [ ...facturaData ]
-}
-```
+---
 
-**Respuesta 400** (faltan parámetros):
-```json
-{ "message": "El parámetro \"desde\" es obligatorio" }
-{ "message": "Debes enviar al menos \"bloque\" o \"codigo\" (ej: G12)" }
-```
+### GET `/api/facturas/buscar/exportar` — Admin
+Exporta las facturas filtradas a un archivo Excel `.xlsx`. Mismos parámetros que `/buscar` sin paginación.
 
-**Respuesta 404** (ninguna casa coincide):
-```json
-{ "message": "No se encontraron casas con los parámetros indicados" }
+**Respuesta:** archivo descargable con nombre:
+```
+facturas_G12_desde_2026-01-01_al_2026-05-08.xlsx
 ```
 
 ---
 
-#### GET `/api/facturas/buscar/exportar`
-Genera y descarga un archivo Excel con los mismos resultados de `/buscar`. Solo `admin`.
+### GET `/api/facturas/:id` — Admin
+Obtiene una factura por ID con todos los campos populados.
 
-**Query params:** idénticos a `/buscar` (`desde`, `bloque` o `codigo`). No tiene paginación — exporta todos los resultados.
-
-**Ejemplos de uso:**
-```
-GET /api/facturas/buscar/exportar?desde=2026-01-01&codigo=G12
-GET /api/facturas/buscar/exportar?desde=2026-01-01&bloque=G
-```
-
-**Respuesta:** archivo `.xlsx` descargable con las columnas:
-`N° Recibo`, `Fecha`, `Casa`, `Descripción`, `Nombre Pagador`, `Método de Pago`, `Valor`, `Estado`, `Anulado`, `Creado Por`, `Aprobado Por`, `Aprobado En`, `Anulado Por`, `Anulado En`
-
-El nombre del archivo generado sigue el patrón:
-```
-facturas_G12_desde_2026-01-01_al_2026-05-05.xlsx
-```
-
-> En Flutter: usa `dio` para descargar el archivo y `path_provider` + `open_file` para guardarlo y abrirlo.
+**Respuesta `200`:** `{ factura }`
 
 ---
 
-#### GET `/api/facturas/:id`
-Obtiene una factura por ID. Solo `admin`.
-
-**Respuesta 200:**
-```json
-{
-  "factura": { ...facturaData }
-}
-```
-
----
-
-#### POST `/api/facturas`
-Crea una factura. Accesible por `user` y `admin`. Siempre queda en `estado: "por_aprobar"`. El campo `creadoPor` se asigna automáticamente del token.
+### POST `/api/facturas` — Admin + User
+Crea una factura vinculada a cargos pendientes de la casa. Los cargos quedan reservados hasta que la factura sea aprobada o rechazada.
 
 **Body:**
 ```json
 {
-  "numeroRecibo": "REC-001",
-  "valor": 150000,
-  "fecha": "2026-05-01",
-  "casa": "<ObjectId de la casa>",
-  "descripcion": "Administración mayo 2026",
-  "nombrePagador": "Juan Pérez",
-  "metodoPago": "efectivo"
+  "numeroRecibo": "001-2026",
+  "valor": 220000,
+  "fecha": "2026-05-08",
+  "casa": "<casaId>",
+  "descripcion": "Pago administración y mora mayo 2026",
+  "nombrePagador": "Carlos Ruiz",
+  "metodoPago": "efectivo",
+  "cargos": ["<cargoId1>", "<cargoId2>"]
 }
 ```
 
-**Respuesta 201:**
-```json
-{
-  "message": "Factura creada exitosamente",
-  "factura": { ...facturaData }
-}
-```
+> `cargos` es un array con los IDs de los cargos pendientes que cubre este pago. Deben pertenecer a la misma casa, estar en estado `pendiente` y no tener otra factura vinculada.
+
+**Respuestas**
+- `201` — `{ message, factura }`
+- `400` — cargos no válidos, no pertenecen a la casa, o ya están pagados
+- `409` — número de recibo duplicado, o cargo ya tiene factura pendiente de aprobación
 
 ---
 
-#### POST `/api/facturas/bulk`
-Crea múltiples facturas. Solo `admin`. Los números de recibo duplicados se omiten.
+### POST `/api/facturas/bulk` — Admin
+Crea múltiples facturas en lote. Uso para importación de datos históricos. No requiere `cargos`.
 
 **Body:**
 ```json
 {
   "facturas": [
     {
-      "numeroRecibo": "REC-001",
-      "valor": 150000,
-      "fecha": "2026-05-01",
-      "casa": "<ObjectId>",
-      "descripcion": "Administración mayo 2026",
-      "nombrePagador": "Juan Pérez"
+      "numeroRecibo": "001-2025",
+      "valor": 200000,
+      "fecha": "2025-03-01",
+      "casa": "<casaId>",
+      "descripcion": "Administración marzo 2025",
+      "nombrePagador": "Juan Pérez",
+      "metodoPago": "efectivo"
     }
   ]
 }
 ```
 
+**Respuestas**
+- `201` — todas creadas
+- `207` — inserción parcial: `{ message, insertadas, duplicados }`
+
 ---
 
-#### PUT `/api/facturas/:id`
-Actualiza datos de una factura. Solo `admin`. No permite modificar `estado`, `creadoPor`, `aprobadoPor` ni `aprobadoEn`.
+### PUT `/api/facturas/:id` — Admin + User
+Edita los campos de una factura. Solo funciona si está en `por_aprobar` y no está anulada.
 
-**Body:** cualquier combinación de campos editables.
+- `numeroRecibo` nunca puede modificarse.
+- Campos editables: `valor`, `fecha`, `casa`, `descripcion`, `nombrePagador`, `metodoPago`.
 
-**Respuesta 200:**
-```json
-{
-  "message": "Factura actualizada exitosamente",
-  "factura": { ...facturaData }
-}
+**Respuestas**
+- `200` — `{ message, factura }`
+- `403` — factura no editable (ya aprobada, rechazada o anulada)
+
+---
+
+### DELETE `/api/facturas/:id` — Admin
+Elimina permanentemente una factura con número de recibo mal digitado. Solo funciona si está en `por_aprobar` y no está anulada. El recibo físico con ese número queda como anulado en papel.
+
+**Respuestas**
+- `200` — `{ message }`
+- `403` — factura no eliminable
+
+---
+
+### PATCH `/api/facturas/:id/aprobar` — Admin
+Aprueba la factura. Marca automáticamente los cargos vinculados como `pagado` y registra `aprobadoPor` y `aprobadoEn`.
+
+**Respuesta `200`:** `{ message, factura }`
+
+---
+
+### PATCH `/api/facturas/:id/rechazar` — Admin
+Rechaza la factura. Libera los cargos vinculados para que puedan ser usados en una nueva factura.
+
+**Respuesta `200`:** `{ message, factura }`
+
+---
+
+### PATCH `/api/facturas/:id/anular` — Admin
+Anula la factura (recibo físico inválido con consecutivo quemado). Revierte los cargos vinculados a `pendiente`, reactivando la deuda. Una factura anulada no puede modificarse ni anularse de nuevo.
+
+**Respuesta `200`:** `{ message, factura }`
+
+---
+
+## Flujo operativo mensual
+
 ```
+1. Inicio de año (primera vez)
+   └─ POST /api/tarifas
+      { año, cuotaAdministracion, multaMora, diasGracia, parqueadero }
+      estado queda en "provisional"
 
----
+2. Inicio de cada mes
+   └─ POST /api/cargos/generar-mensual
+      { periodo: "YYYY-MM" }
+      Genera administración + parqueadero para todas las casas activas
 
-#### PATCH `/api/facturas/:id/aprobar`
-Aprueba una factura. Solo `admin`. Registra quién aprobó y cuándo.
+3. Día 11 (o el día siguiente al diasGracia de la tarifa)
+   └─ POST /api/cargos/aplicar-mora
+      { periodo: "YYYY-MM" }
+      Aplica mora a las casas que no han pagado
 
-**Respuesta 200:**
-```json
-{
-  "message": "Factura aprobada exitosamente",
-  "factura": { ...facturaData }
-}
+4. Cuando la junta define la tarifa final del año
+   └─ PATCH /api/tarifas/:id/definir
+      { cuotaAdministracion: valorFinal, ... }
+      Actualiza cargos pendientes y genera retroactivos automáticamente
+
+5. Cuando se necesita un cobro especial
+   └─ POST /api/cargos/extraordinario
+      { descripcion, monto, vencimiento }
+
+6. Cuando un residente paga
+   a. GET /api/cargos/casa/:casaId/estado-cuenta   → ver cargos pendientes
+   b. POST /api/facturas                            → crear factura vinculando los cargos
+   c. PATCH /api/facturas/:id/aprobar               → aprobar y marcar cargos como pagados
 ```
-
----
-
-#### PATCH `/api/facturas/:id/rechazar`
-Rechaza una factura. Solo `admin`.
-
-**Respuesta 200:**
-```json
-{
-  "message": "Factura rechazada",
-  "factura": { ...facturaData }
-}
-```
-
----
-
-#### PATCH `/api/facturas/:id/anular`
-Anula una factura. Solo `admin`. Registra quién anuló y cuándo. Una factura anulada no puede anularse de nuevo.
-
-**Respuesta 200:**
-```json
-{
-  "message": "Factura anulada exitosamente",
-  "factura": { ...facturaData }
-}
-```
-
----
-
-## Códigos de error comunes
-
-| Código | Significado |
-|--------|-------------|
-| `400` | Datos inválidos o faltantes en el body |
-| `401` | Token ausente, inválido o expirado |
-| `403` | Sin permisos (rol insuficiente o cuenta inactiva) |
-| `404` | Recurso no encontrado |
-| `409` | Conflicto — registro duplicado (email, numeroRecibo, bloque+numeroCasa) |
-| `500` | Error interno del servidor |

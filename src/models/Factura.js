@@ -59,6 +59,12 @@ const facturaSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    cargos: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Cargo',
+      },
+    ],
     anulado: {
       type: Boolean,
       default: false,

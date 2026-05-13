@@ -5,6 +5,8 @@ const authRoutes = require('./routes/auth.routes');
 const userRoutes = require('./routes/user.routes');
 const casaRoutes = require('./routes/casa.routes');
 const facturaRoutes = require('./routes/factura.routes');
+const tarifaRoutes = require('./routes/tarifa.routes');
+const cargoRoutes = require('./routes/cargo.routes');
 
 const app = express();
 
@@ -15,6 +17,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/casas', casaRoutes);
 app.use('/api/facturas', facturaRoutes);
+app.use('/api/tarifas', tarifaRoutes);
+app.use('/api/cargos', cargoRoutes);
 
 app.use((_req, res) => res.status(404).json({ message: 'Route not found' }));
 

@@ -2,6 +2,7 @@ const { validationResult } = require('express-validator');
 const ExcelJS = require('exceljs');
 const Factura = require('../models/Factura');
 const Casa = require('../models/Casa');
+const Cargo = require('../models/Cargo');
 
 // bloque + numeroCasa are needed so the 'codigo' virtual (e.g. "G12") is computed
 const populate = [
@@ -53,18 +54,41 @@ const obtenerFactura = async (req, res) => {
 const crearFactura = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty())
-    return res.status(400).json({ errors: errors.array() });
+    return res.status(400).json({ message: errors.array()[0].msg, errors: errors.array() });
 
   try {
     const casaExiste = await Casa.findById(req.body.casa);
     if (!casaExiste)
       return res.status(404).json({ message: 'La casa especificada no existe' });
 
+    const { cargos: cargoIds } = req.body;
+
+    // Validate that all cargos exist, belong to the casa, and are pendiente with no factura linked
+    const cargos = await Cargo.find({ _id: { $in: cargoIds } });
+
+    if (cargos.length !== cargoIds.length)
+      return res.status(404).json({ message: 'Uno o más cargos no existen' });
+
+    for (const cargo of cargos) {
+      if (cargo.casa.toString() !== req.body.casa)
+        return res.status(400).json({ message: `El cargo ${cargo._id} no pertenece a esta casa` });
+      if (cargo.estado === 'pagado')
+        return res.status(400).json({ message: `El cargo ${cargo._id} ya está pagado` });
+      if (cargo.factura)
+        return res.status(409).json({ message: `El cargo ${cargo._id} ya tiene una factura pendiente de aprobación` });
+    }
+
     const factura = await Factura.create({
       ...req.body,
       estado: 'por_aprobar',
       creadoPor: req.user._id,
     });
+
+    // Reserve cargos so they can't be linked to another factura while this one is pending
+    await Cargo.updateMany(
+      { _id: { $in: cargoIds } },
+      { $set: { factura: factura._id } }
+    );
 
     await factura.populate(populate);
     return res.status(201).json({ message: 'Factura creada exitosamente', factura });
@@ -124,14 +148,26 @@ const crearFacturasEnLote = async (req, res) => {
 const actualizarFactura = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty())
-    return res.status(400).json({ errors: errors.array() });
+    return res.status(400).json({ message: errors.array()[0].msg, errors: errors.array() });
 
   try {
-    // Prevent manually changing estado through this endpoint
+    const factura = await Factura.findById(req.params.id);
+    if (!factura) return res.status(404).json({ message: 'Factura no encontrada' });
+
+    if (factura.estado !== 'por_aprobar' || factura.anulado)
+      return res.status(403).json({
+        message: 'Solo se pueden editar facturas en estado "por_aprobar" que no estén anuladas',
+      });
+
+    // Campos protegidos — nunca modificables por esta ruta
+    delete req.body.numeroRecibo;
     delete req.body.estado;
     delete req.body.creadoPor;
     delete req.body.aprobadoPor;
     delete req.body.aprobadoEn;
+    delete req.body.anulado;
+    delete req.body.anuladoPor;
+    delete req.body.anuladoEn;
 
     if (req.body.casa) {
       const casaExiste = await Casa.findById(req.body.casa);
@@ -139,21 +175,34 @@ const actualizarFactura = async (req, res) => {
         return res.status(404).json({ message: 'La casa especificada no existe' });
     }
 
-    const factura = await Factura.findByIdAndUpdate(req.params.id, req.body, {
+    const actualizada = await Factura.findByIdAndUpdate(req.params.id, req.body, {
       new: true,
       runValidators: true,
     }).populate(populate);
 
-    if (!factura) return res.status(404).json({ message: 'Factura no encontrada' });
-
-    return res.json({ message: 'Factura actualizada exitosamente', factura });
+    return res.json({ message: 'Factura actualizada exitosamente', factura: actualizada });
   } catch (error) {
-    if (error.code === 11000)
-      return res.status(409).json({ message: 'El número de recibo ya existe' });
     return res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
 
+
+const eliminarFactura = async (req, res) => {
+  try {
+    const factura = await Factura.findById(req.params.id);
+    if (!factura) return res.status(404).json({ message: 'Factura no encontrada' });
+
+    if (factura.estado !== 'por_aprobar' || factura.anulado)
+      return res.status(403).json({
+        message: 'Solo se pueden eliminar facturas en estado "por_aprobar" que no estén anuladas',
+      });
+
+    await factura.deleteOne();
+    return res.json({ message: 'Factura eliminada exitosamente' });
+  } catch (error) {
+    return res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
 
 const aprobarFactura = async (req, res) => {
   try {
@@ -167,8 +216,16 @@ const aprobarFactura = async (req, res) => {
     factura.aprobadoPor = req.user._id;
     factura.aprobadoEn = new Date();
     await factura.save();
-    await factura.populate(populate);
 
+    // Mark all linked cargos as paid
+    if (factura.cargos?.length) {
+      await Cargo.updateMany(
+        { _id: { $in: factura.cargos } },
+        { $set: { estado: 'pagado', fechaPago: new Date() } }
+      );
+    }
+
+    await factura.populate(populate);
     return res.json({ message: 'Factura aprobada exitosamente', factura });
   } catch (error) {
     return res.status(500).json({ message: 'Server error', error: error.message });
@@ -187,8 +244,16 @@ const rechazarFactura = async (req, res) => {
     factura.aprobadoPor = null;
     factura.aprobadoEn = null;
     await factura.save();
-    await factura.populate(populate);
 
+    // Release reserved cargos so they can be linked to a new factura
+    if (factura.cargos?.length) {
+      await Cargo.updateMany(
+        { _id: { $in: factura.cargos } },
+        { $set: { factura: null } }
+      );
+    }
+
+    await factura.populate(populate);
     return res.json({ message: 'Factura rechazada', factura });
   } catch (error) {
     return res.status(500).json({ message: 'Server error', error: error.message });
@@ -207,6 +272,15 @@ const anularFactura = async (req, res) => {
     factura.anuladoPor = req.user._id;
     factura.anuladoEn = new Date();
     await factura.save();
+
+    // Revert cargos to pendiente so the debt is active again
+    if (factura.cargos?.length) {
+      await Cargo.updateMany(
+        { _id: { $in: factura.cargos } },
+        { $set: { estado: 'pendiente', factura: null, fechaPago: null } }
+      );
+    }
+
     await factura.populate([
       ...populate,
       { path: 'anuladoPor', select: 'name email role' },
@@ -387,6 +461,7 @@ module.exports = {
   crearFactura,
   crearFacturasEnLote,
   actualizarFactura,
+  eliminarFactura,
   aprobarFactura,
   rechazarFactura,
   anularFactura,
