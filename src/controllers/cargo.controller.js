@@ -195,6 +195,78 @@ const aplicarMora = async (req, res) => {
   }
 };
 
+// Creates a single cargo for one house by ID.
+// For period-based types (administracion, parqueadero, mora), checks for duplicates first.
+// monto and vencimiento are auto-resolved from tarifa when not provided.
+const crearCargoCasa = async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty())
+    return res.status(400).json({ message: errors.array()[0].msg, errors: errors.array() });
+
+  const { casaId } = req.params;
+  const { tipo, periodo, monto: montoBody, vencimiento: vencimientoBody, descripcion } = req.body;
+
+  const TIPOS_CON_PERIODO = ['administracion', 'parqueadero', 'mora'];
+
+  try {
+    const casa = await Casa.findById(casaId);
+    if (!casa) return res.status(404).json({ message: 'Casa no encontrada' });
+
+    if (TIPOS_CON_PERIODO.includes(tipo) && !periodo)
+      return res.status(400).json({ message: `El campo periodo es requerido para el tipo "${tipo}"` });
+
+    if (periodo) {
+      const existente = await Cargo.findOne({ casa: casaId, tipo, periodo });
+      if (existente)
+        return res.status(409).json({
+          message: `Ya existe un cargo de tipo "${tipo}" para el periodo ${periodo} en esta casa`,
+          cargo: existente._id,
+        });
+    }
+
+    let monto = montoBody;
+    let vencimiento = vencimientoBody ? new Date(vencimientoBody) : null;
+    let tarifaId = null;
+
+    if ((!monto || !vencimiento) && periodo) {
+      const anio = parseInt(periodo.split('-')[0]);
+      const mes = parseInt(periodo.split('-')[1]);
+      const tarifa = await Tarifa.findOne({ anio });
+      if (tarifa) {
+        tarifaId = tarifa._id;
+        if (!monto) {
+          if (tipo === 'administracion') monto = tarifa.cuotaAdministracion;
+          else if (tipo === 'parqueadero') monto = tarifa.parqueadero;
+          else if (tipo === 'mora') monto = tarifa.multaMora;
+        }
+        if (!vencimiento) vencimiento = new Date(anio, mes - 1, tarifa.diasGracia);
+      }
+    }
+
+    if (!monto || monto <= 0)
+      return res.status(400).json({ message: 'El monto es requerido y no pudo derivarse de la tarifa' });
+    if (!vencimiento)
+      return res.status(400).json({ message: 'La fecha de vencimiento es requerida y no pudo derivarse de la tarifa' });
+
+    const cargo = await Cargo.create({
+      casa: casaId,
+      tipo,
+      periodo: periodo || null,
+      monto,
+      vencimiento,
+      descripcion: descripcion || null,
+      creadoPor: req.user._id,
+      tarifa: tarifaId,
+    });
+
+    await cargo.populate(populateCargo);
+
+    return res.status(201).json({ message: 'Cargo creado exitosamente', cargo });
+  } catch (error) {
+    return res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
 // Creates an extraordinary charge for all active houses.
 const crearExtraordinario = async (req, res) => {
   const errors = validationResult(req);
@@ -226,4 +298,4 @@ const crearExtraordinario = async (req, res) => {
   }
 };
 
-module.exports = { listarCargos, estadoCuenta, generarMensual, aplicarMora, crearExtraordinario };
+module.exports = { listarCargos, estadoCuenta, generarMensual, aplicarMora, crearExtraordinario, crearCargoCasa };

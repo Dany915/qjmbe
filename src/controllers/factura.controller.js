@@ -3,6 +3,7 @@ const ExcelJS = require('exceljs');
 const Factura = require('../models/Factura');
 const Casa = require('../models/Casa');
 const Cargo = require('../models/Cargo');
+const Tarifa = require('../models/Tarifa');
 
 // bloque + numeroCasa are needed so the 'codigo' virtual (e.g. "G12") is computed
 const populate = [
@@ -281,11 +282,25 @@ const anularFactura = async (req, res) => {
     factura.anuladoEn = new Date();
     await factura.save();
 
-    // Revert cargos to pendiente so the debt is active again
+    // Revert cargos: restore vencido if past due, pendiente otherwise
     if (factura.cargos?.length) {
       await Cargo.updateMany(
         { _id: { $in: factura.cargos } },
-        { $set: { estado: 'pendiente', factura: null, fechaPago: null } }
+        [
+          {
+            $set: {
+              estado: {
+                $cond: {
+                  if: { $lt: ['$vencimiento', new Date()] },
+                  then: 'vencido',
+                  else: 'pendiente',
+                },
+              },
+              factura: null,
+              fechaPago: null,
+            },
+          },
+        ]
       );
     }
 
@@ -463,6 +478,147 @@ const buscarFacturas = async (req, res) => {
   }
 };
 
+// Registers historical paid invoices in bulk.
+// Simulates the flow as if the facturas had been entered before definirTarifa ran:
+//   1. Adjusts existing admin cargo monto to the provisional rate (valor - parking monto).
+//   2. Creates the factura already approved with the historical date.
+//   3. Marks linked cargos as pagado with the historical fechaPago.
+//   4. Generates a retroactivo for the difference (definitiva - provisional) when applicable.
+const registrarHistoricaLote = async (req, res) => {
+  const { facturas } = req.body;
+
+  if (!Array.isArray(facturas) || facturas.length === 0)
+    return res.status(400).json({ message: 'Debes enviar un array de facturas en el campo "facturas"' });
+
+  const procesadas = [];
+  const omitidas = [];
+
+  for (const item of facturas) {
+    const { casa: casaId, periodo, valor, fecha, nombrePagador, metodoPago, numeroRecibo, descripcion } = item;
+
+    try {
+      // Duplicate receipt check
+      const reciboDuplicado = await Factura.findOne({ numeroRecibo });
+      if (reciboDuplicado) {
+        omitidas.push({ numeroRecibo, razon: 'Número de recibo duplicado' });
+        continue;
+      }
+
+      const casa = await Casa.findById(casaId);
+      if (!casa) {
+        omitidas.push({ numeroRecibo, razon: 'Casa no encontrada' });
+        continue;
+      }
+
+      // Find all pending/overdue cargos for this casa + periodo not already linked
+      const cargos = await Cargo.find({
+        casa: casaId,
+        periodo,
+        estado: { $in: ['pendiente', 'vencido'] },
+        factura: null,
+      });
+
+      const cargosPagados = await Cargo.find({ casa: casaId, periodo, estado: 'pagado' });
+      if (cargosPagados.length > 0 && cargos.length === 0) {
+        omitidas.push({ numeroRecibo, razon: `Los cargos del periodo ${periodo} ya están pagados` });
+        continue;
+      }
+
+      let cargoIds = [];
+      let retroactivoDiff = 0;
+      let tarifaId = null;
+
+      if (cargos.length > 0) {
+        const adminCargo = cargos.find((c) => c.tipo === 'administracion');
+        const parkingCargo = cargos.find((c) => c.tipo === 'parqueadero');
+
+        if (adminCargo) {
+          // adminCargo.monto is at definitiva rate (updated by definirTarifa)
+          const definitivaAdmin = adminCargo.monto;
+          const provisionalParking = parkingCargo?.monto ?? 0;
+          const provisionalAdmin = valor - provisionalParking;
+
+          retroactivoDiff = definitivaAdmin - provisionalAdmin;
+          tarifaId = adminCargo.tarifa;
+
+          adminCargo.monto = provisionalAdmin;
+          await adminCargo.save();
+        }
+
+        cargoIds = cargos.map((c) => c._id);
+      } else {
+        // No cargos exist for this period — create a fresh admin cargo at the provisional rate
+        const anio = parseInt(periodo.split('-')[0]);
+        const mes = parseInt(periodo.split('-')[1]);
+        const tarifa = await Tarifa.findOne({ anio });
+
+        const nuevoCargo = await Cargo.create({
+          casa: casaId,
+          tipo: 'administracion',
+          periodo,
+          monto: valor,
+          vencimiento: tarifa ? new Date(anio, mes - 1, tarifa.diasGracia) : new Date(fecha),
+          descripcion,
+          creadoPor: req.user._id,
+          tarifa: tarifa?._id ?? null,
+        });
+
+        cargoIds = [nuevoCargo._id];
+        tarifaId = tarifa?._id ?? null;
+      }
+
+      const factura = await Factura.create({
+        numeroRecibo,
+        valor,
+        fecha: new Date(fecha),
+        casa: casaId,
+        descripcion,
+        nombrePagador,
+        metodoPago,
+        estado: 'aprobado',
+        creadoPor: req.user._id,
+        aprobadoPor: req.user._id,
+        aprobadoEn: new Date(),
+        cargos: cargoIds,
+      });
+
+      await Cargo.updateMany(
+        { _id: { $in: cargoIds } },
+        { $set: { estado: 'pagado', fechaPago: new Date(fecha), factura: factura._id } }
+      );
+
+      if (retroactivoDiff > 0) {
+        const existeRetroactivo = await Cargo.findOne({ casa: casaId, tipo: 'retroactivo', periodo });
+        if (!existeRetroactivo) {
+          const anio = periodo.split('-')[0];
+          await Cargo.create({
+            casa: casaId,
+            tipo: 'retroactivo',
+            periodo,
+            monto: retroactivoDiff,
+            vencimiento: new Date(),
+            descripcion: `Retroactivo ${anio}: diferencia provisional→definitiva ${periodo}`,
+            creadoPor: req.user._id,
+            tarifa: tarifaId,
+          });
+        }
+      }
+
+      procesadas.push({ numeroRecibo, periodo, valor, retroactivo: retroactivoDiff > 0 ? retroactivoDiff : null });
+    } catch (err) {
+      omitidas.push({ numeroRecibo: numeroRecibo ?? 'N/A', razon: err.message });
+    }
+  }
+
+  return res.status(207).json({
+    message: `${procesadas.length} factura(s) registrada(s), ${omitidas.length} omitida(s)`,
+    procesadas: procesadas.length,
+    omitidas: omitidas.length,
+    retroactivosGenerados: procesadas.filter((p) => p.retroactivo).length,
+    detalle_omitidas: omitidas,
+  });
+};
+
 module.exports = {
   listarFacturas,
   obtenerFactura,
@@ -475,5 +631,6 @@ module.exports = {
   anularFactura,
   exportarFacturas,
   buscarFacturas,
+  registrarHistoricaLote,
 };
 
