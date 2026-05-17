@@ -52,44 +52,40 @@ const obtenerFactura = async (req, res) => {
   }
 };
 
+// Creates a factura and auto-generates its cargos from the provided specs.
+// For period-based types (administracion, parqueadero, mora): reuses an existing
+// unpaid cargo for that casa+tipo+periodo if one exists, otherwise creates it.
+// For non-period types (retroactivo, extraordinario): always creates a new cargo.
 const crearFactura = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty())
     return res.status(400).json({ message: errors.array()[0].msg, errors: errors.array() });
 
+  const { numeroRecibo, casa: casaId, fecha, nombrePagador, metodoPago, descripcion, valor, cargos: specs } = req.body;
+
   try {
-    const casaExiste = await Casa.findById(req.body.casa);
-    if (!casaExiste)
-      return res.status(404).json({ message: 'La casa especificada no existe' });
+    const casa = await Casa.findById(casaId);
+    if (!casa) return res.status(404).json({ message: 'La casa especificada no existe' });
 
-    const { cargos: cargoIds } = req.body;
-
-    // Validate that all cargos exist, belong to the casa, and are pendiente with no factura linked
-    const cargos = await Cargo.find({ _id: { $in: cargoIds } });
-
-    if (cargos.length !== cargoIds.length)
-      return res.status(404).json({ message: 'Uno o más cargos no existen' });
-
-    for (const cargo of cargos) {
-      if (cargo.casa.toString() !== req.body.casa)
-        return res.status(400).json({ message: `El cargo ${cargo._id} no pertenece a esta casa` });
-      if (cargo.estado === 'pagado')
-        return res.status(400).json({ message: `El cargo ${cargo._id} ya está pagado` });
-      if (cargo.factura)
-        return res.status(409).json({ message: `El cargo ${cargo._id} ya tiene una factura pendiente de aprobación` });
-    }
+    const cargoIds = await _resolverCargos(specs, casaId, fecha, req.user._id).catch((err) =>
+      res.status(400).json({ message: err.message })
+    );
+    if (!cargoIds) return;
 
     const factura = await Factura.create({
-      ...req.body,
+      numeroRecibo,
+      valor,
+      fecha: new Date(fecha),
+      casa: casaId,
+      descripcion,
+      nombrePagador,
+      metodoPago,
       estado: 'por_aprobar',
       creadoPor: req.user._id,
+      cargos: cargoIds,
     });
 
-    // Reserve cargos so they can't be linked to another factura while this one is pending
-    await Cargo.updateMany(
-      { _id: { $in: cargoIds } },
-      { $set: { factura: factura._id } }
-    );
+    await Cargo.updateMany({ _id: { $in: cargoIds } }, { $set: { factura: factura._id } });
 
     await factura.populate(populate);
     return res.status(201).json({ message: 'Factura creada exitosamente', factura });
@@ -478,6 +474,142 @@ const buscarFacturas = async (req, res) => {
   }
 };
 
+// Shared helper: resolves and creates cargos from specs for a given casa.
+// Returns the list of cargo IDs or throws an error string via rejection.
+const _resolverCargos = async (specs, casaId, fallbackFecha, adminUserId) => {
+  const TIPOS_CON_PERIODO = ['administracion', 'parqueadero', 'mora'];
+  const cargoIds = [];
+
+  for (const spec of specs) {
+    const { tipo, periodo, monto: montoSpec, descripcion: descSpec, vencimiento: vencSpec } = spec;
+
+    if (TIPOS_CON_PERIODO.includes(tipo) && !periodo)
+      throw new Error(`El tipo "${tipo}" requiere un campo periodo (YYYY-MM)`);
+
+    if (periodo) {
+      const existente = await Cargo.findOne({ casa: casaId, tipo, periodo });
+      if (existente) {
+        if (existente.estado === 'pagado')
+          throw new Error(`El cargo de ${tipo} para ${periodo} ya está pagado`);
+        if (existente.factura)
+          throw new Error(`El cargo de ${tipo} para ${periodo} ya está reservado en otra factura`);
+        cargoIds.push(existente._id);
+        continue;
+      }
+    }
+
+    let monto = montoSpec;
+    let vencimiento = vencSpec ? new Date(vencSpec) : null;
+    let tarifaId = null;
+
+    if (TIPOS_CON_PERIODO.includes(tipo) && periodo) {
+      const anio = parseInt(periodo.split('-')[0]);
+      const mes = parseInt(periodo.split('-')[1]);
+      const tarifa = await Tarifa.findOne({ anio });
+      if (tarifa) {
+        tarifaId = tarifa._id;
+        if (!monto) {
+          if (tipo === 'administracion') monto = tarifa.cuotaAdministracion;
+          else if (tipo === 'parqueadero') monto = tarifa.parqueadero;
+          else if (tipo === 'mora') monto = tarifa.multaMora;
+        }
+        if (!vencimiento) vencimiento = new Date(anio, mes - 1, tarifa.diasGracia);
+      }
+    }
+
+    if (!monto || monto <= 0)
+      throw new Error(
+        `El cargo de tipo "${tipo}"${periodo ? ` (${periodo})` : ''} requiere un monto. No hay tarifa o no se especificó.`
+      );
+
+    if (!vencimiento) vencimiento = new Date(fallbackFecha);
+
+    const nuevoCargo = await Cargo.create({
+      casa: casaId,
+      tipo,
+      periodo: periodo || null,
+      monto,
+      vencimiento,
+      descripcion: descSpec || null,
+      creadoPor: adminUserId,
+      tarifa: tarifaId,
+    });
+
+    cargoIds.push(nuevoCargo._id);
+  }
+
+  return cargoIds;
+};
+
+// Bulk import of already-approved facturas using cargo specs.
+// Creates cargos on the fly (or reuses existing pending ones), marks everything
+// as approved and paid immediately. Designed for loading historical data.
+const registrarAprobadosLote = async (req, res) => {
+  const { facturas } = req.body;
+
+  if (!Array.isArray(facturas) || facturas.length === 0)
+    return res.status(400).json({ message: 'Debes enviar un array de facturas en el campo "facturas"' });
+
+  const procesadas = [];
+  const omitidas = [];
+
+  for (const item of facturas) {
+    const { numeroRecibo, casa: casaId, fecha, nombrePagador, metodoPago, descripcion, valor, cargos: specs } = item;
+
+    try {
+      const duplicado = await Factura.findOne({ numeroRecibo });
+      if (duplicado) {
+        omitidas.push({ numeroRecibo, razon: 'Número de recibo duplicado' });
+        continue;
+      }
+
+      const casa = await Casa.findById(casaId);
+      if (!casa) {
+        omitidas.push({ numeroRecibo, razon: 'Casa no encontrada' });
+        continue;
+      }
+
+      if (!Array.isArray(specs) || specs.length === 0) {
+        omitidas.push({ numeroRecibo, razon: 'Debes especificar al menos un cargo' });
+        continue;
+      }
+
+      const cargoIds = await _resolverCargos(specs, casaId, fecha, req.user._id);
+
+      const factura = await Factura.create({
+        numeroRecibo,
+        valor,
+        fecha: new Date(fecha),
+        casa: casaId,
+        descripcion,
+        nombrePagador,
+        metodoPago,
+        estado: 'aprobado',
+        creadoPor: req.user._id,
+        aprobadoPor: req.user._id,
+        aprobadoEn: new Date(),
+        cargos: cargoIds,
+      });
+
+      await Cargo.updateMany(
+        { _id: { $in: cargoIds } },
+        { $set: { estado: 'pagado', fechaPago: new Date(fecha), factura: factura._id } }
+      );
+
+      procesadas.push({ numeroRecibo, facturaId: factura._id, cargos: cargoIds.length });
+    } catch (err) {
+      omitidas.push({ numeroRecibo: numeroRecibo ?? 'N/A', razon: err.message });
+    }
+  }
+
+  return res.status(207).json({
+    message: `${procesadas.length} factura(s) registrada(s) y aprobadas, ${omitidas.length} omitida(s)`,
+    procesadas: procesadas.length,
+    omitidas: omitidas.length,
+    detalle_omitidas: omitidas,
+  });
+};
+
 // Registers historical paid invoices in bulk.
 // Simulates the flow as if the facturas had been entered before definirTarifa ran:
 //   1. Adjusts existing admin cargo monto to the provisional rate (valor - parking monto).
@@ -632,5 +764,6 @@ module.exports = {
   exportarFacturas,
   buscarFacturas,
   registrarHistoricaLote,
+  registrarAprobadosLote,
 };
 
