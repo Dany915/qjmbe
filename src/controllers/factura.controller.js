@@ -312,39 +312,27 @@ const anularFactura = async (req, res) => {
 };
 
 const exportarFacturas = async (req, res) => {
-  const { desde, bloque, codigo } = req.query;
+  const { desde, hasta, estado, anulado, metodoPago } = req.query;
 
   if (!desde)
     return res.status(400).json({ message: 'El parámetro "desde" es obligatorio' });
-
-  if (!bloque && !codigo)
-    return res.status(400).json({ message: 'Debes enviar al menos "bloque" o "codigo" (ej: G12)' });
-
-  const fechaDesde = new Date(desde);
-  if (isNaN(fechaDesde.getTime()))
+  if (isNaN(new Date(desde).getTime()))
     return res.status(400).json({ message: 'La fecha "desde" no es válida. Usa formato YYYY-MM-DD' });
+  if (hasta && isNaN(new Date(hasta).getTime()))
+    return res.status(400).json({ message: 'La fecha "hasta" no es válida. Usa formato YYYY-MM-DD' });
 
   try {
-    const casaFilter = codigo
-      ? { $expr: { $eq: [{ $concat: ['$bloque', '$numeroCasa'] }, codigo.toUpperCase()] } }
-      : { bloque: { $regex: new RegExp(`^${bloque}$`, 'i') } };
+    const filter = buildFacturaFilter({ desde, hasta, estado, anulado, metodoPago });
 
-    const casas = await Casa.find(casaFilter).select('_id');
-
-    if (casas.length === 0)
-      return res.status(404).json({ message: 'No se encontraron casas con los parámetros indicados' });
-
-    const facturas = await Factura.find({
-      casa: { $in: casas.map((c) => c._id) },
-      fecha: { $gte: fechaDesde, $lte: new Date() },
-    })
+    const facturas = await Factura.find(filter)
+      .collation({ locale: 'en', numericOrdering: true })
       .populate([
         { path: 'casa', select: 'bloque numeroCasa' },
         { path: 'creadoPor', select: 'name email' },
         { path: 'aprobadoPor', select: 'name email' },
         { path: 'anuladoPor', select: 'name email' },
       ])
-      .sort({ fecha: -1 });
+      .sort({ numeroRecibo: 1 });
 
     const workbook = new ExcelJS.Workbook();
     workbook.creator = 'qjmbe';
@@ -371,7 +359,6 @@ const exportarFacturas = async (req, res) => {
       { header: 'Anulado En',     key: 'anuladoEn',     width: 20 },
     ];
 
-    // Style header row
     const headerRow = sheet.getRow(1);
     headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
     headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } };
@@ -398,19 +385,14 @@ const exportarFacturas = async (req, res) => {
         anuladoEn:     fmt(f.anuladoEn),
       });
 
-      // Right-align valor column
       row.getCell('valor').alignment = { horizontal: 'right' };
-
-      // Format valor as currency
       row.getCell('valor').numFmt = '"$"#,##0';
     });
 
-    // Freeze header row
     sheet.views = [{ state: 'frozen', ySplit: 1 }];
 
-    const fecha = new Date().toISOString().slice(0, 10);
-    const filtro = codigo ? codigo.toUpperCase() : `bloque-${bloque}`;
-    const filename = `facturas_${filtro}_desde_${desde}_al_${fecha}.xlsx`;
+    const hoy = new Date().toISOString().slice(0, 10);
+    const filename = `facturas_desde_${desde}_al_${hasta ?? hoy}.xlsx`;
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -422,45 +404,65 @@ const exportarFacturas = async (req, res) => {
   }
 };
 
+// Builds a Mongo filter from the shared search params.
+// All params are optional; omitting them applies no restriction for that field.
+const buildFacturaFilter = ({ desde, hasta, estado, anulado, metodoPago, casaIds } = {}) => {
+  const filter = {};
+
+  if (desde) {
+    const fechaHasta = hasta ? new Date(hasta) : new Date();
+    fechaHasta.setUTCHours(23, 59, 59, 999);
+    filter.fecha = { $gte: new Date(desde), $lte: fechaHasta };
+  }
+
+  if (estado) {
+    const raw = Array.isArray(estado) ? estado : String(estado).split(',');
+    const estados = raw.map((e) => e.trim()).filter(Boolean);
+    filter.estado = estados.length === 1 ? estados[0] : { $in: estados };
+  }
+
+  if (anulado === 'true') filter.anulado = true;
+  else if (anulado === 'false') filter.anulado = false;
+
+  if (metodoPago && ['efectivo', 'digital'].includes(metodoPago))
+    filter.metodoPago = metodoPago;
+
+  if (casaIds?.length) filter.casa = { $in: casaIds };
+
+  return filter;
+};
+
 const buscarFacturas = async (req, res) => {
-  const { desde, bloque, codigo, page = 1, limit = 20 } = req.query;
+  const { desde, hasta, estado, anulado, metodoPago, bloque, codigo, page = 1, limit = 20 } = req.query;
 
-  if (!desde)
-    return res.status(400).json({ message: 'El parámetro "desde" es obligatorio' });
-
-  if (!bloque && !codigo)
-    return res.status(400).json({ message: 'Debes enviar al menos "bloque" o "codigo" (ej: G12)' });
-
-  const fechaDesde = new Date(desde);
-  if (isNaN(fechaDesde.getTime()))
+  if (desde && isNaN(new Date(desde).getTime()))
     return res.status(400).json({ message: 'La fecha "desde" no es válida. Usa formato YYYY-MM-DD' });
+  if (hasta && isNaN(new Date(hasta).getTime()))
+    return res.status(400).json({ message: 'La fecha "hasta" no es válida. Usa formato YYYY-MM-DD' });
 
   try {
-    // Build casa filter — codigo takes priority over bloque when both are sent
-    const casaFilter = codigo
-      ? { $expr: { $eq: [{ $concat: ['$bloque', '$numeroCasa'] }, codigo.toUpperCase()] } }
-      : { bloque: { $regex: new RegExp(`^${bloque}$`, 'i') } };
+    let casaIds;
+    if (bloque || codigo) {
+      const casaFilter = codigo
+        ? { $expr: { $eq: [{ $concat: ['$bloque', '$numeroCasa'] }, codigo.toUpperCase()] } }
+        : { bloque: { $regex: new RegExp(`^${bloque}$`, 'i') } };
+      const casas = await Casa.find(casaFilter).select('_id');
+      if (!casas.length)
+        return res.status(404).json({ message: 'No se encontraron casas con ese filtro' });
+      casaIds = casas.map((c) => c._id);
+    }
 
-    const casas = await Casa.find(casaFilter).select('_id');
-
-    if (casas.length === 0)
-      return res.status(404).json({ message: 'No se encontraron casas con los parámetros indicados' });
-
-    const casaIds = casas.map((c) => c._id);
+    const filter = buildFacturaFilter({ desde, hasta, estado, anulado, metodoPago, casaIds });
     const skip = (Number(page) - 1) * Number(limit);
 
-    const facturaFilter = {
-      casa: { $in: casaIds },
-      fecha: { $gte: fechaDesde, $lte: new Date() },
-    };
-
     const [facturas, total] = await Promise.all([
-      Factura.find(facturaFilter)
+      Factura.find(filter)
+        .collation({ locale: 'en', numericOrdering: true })
         .populate(populate)
-        .sort({ fecha: -1 })
+        .sort({ numeroRecibo: 1 })
         .skip(skip)
         .limit(Number(limit)),
-      Factura.countDocuments(facturaFilter),
+      Factura.countDocuments(filter),
     ]);
 
     return res.json({
@@ -469,6 +471,52 @@ const buscarFacturas = async (req, res) => {
       pages: Math.ceil(total / Number(limit)),
       facturas,
     });
+  } catch (error) {
+    return res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+const resumenFacturas = async (req, res) => {
+  const { desde, hasta, estado, anulado, metodoPago, bloque, codigo } = req.query;
+
+  if (desde && isNaN(new Date(desde).getTime()))
+    return res.status(400).json({ message: 'La fecha "desde" no es válida. Usa formato YYYY-MM-DD' });
+  if (hasta && isNaN(new Date(hasta).getTime()))
+    return res.status(400).json({ message: 'La fecha "hasta" no es válida. Usa formato YYYY-MM-DD' });
+
+  try {
+    let casaIds;
+    if (bloque || codigo) {
+      const casaFilter = codigo
+        ? { $expr: { $eq: [{ $concat: ['$bloque', '$numeroCasa'] }, codigo.toUpperCase()] } }
+        : { bloque: { $regex: new RegExp(`^${bloque}$`, 'i') } };
+      const casas = await Casa.find(casaFilter).select('_id');
+      if (!casas.length)
+        return res.status(404).json({ message: 'No se encontraron casas con ese filtro' });
+      casaIds = casas.map((c) => c._id);
+    }
+
+    const filter = buildFacturaFilter({ desde, hasta, estado, anulado, metodoPago, casaIds });
+
+    const [resultado] = await Factura.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: 1 },
+          totalValor: { $sum: '$valor' },
+          totalEfectivo: {
+            $sum: { $cond: [{ $eq: ['$metodoPago', 'efectivo'] }, '$valor', 0] },
+          },
+          totalDigital: {
+            $sum: { $cond: [{ $eq: ['$metodoPago', 'digital'] }, '$valor', 0] },
+          },
+        },
+      },
+      { $project: { _id: 0 } },
+    ]);
+
+    return res.json(resultado ?? { total: 0, totalValor: 0, totalEfectivo: 0, totalDigital: 0 });
   } catch (error) {
     return res.status(500).json({ message: 'Server error', error: error.message });
   }
@@ -763,6 +811,7 @@ module.exports = {
   anularFactura,
   exportarFacturas,
   buscarFacturas,
+  resumenFacturas,
   registrarHistoricaLote,
   registrarAprobadosLote,
 };

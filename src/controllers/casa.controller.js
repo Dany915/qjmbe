@@ -7,7 +7,7 @@ const listarCasas = async (req, res) => {
 
     // By default only return active houses; pass ?activa=false to see inactive
     const filter = { activa: activa === 'false' ? false : true };
-    if (bloque) filter.bloque = bloque;
+    if (bloque) filter.bloque = { $regex: new RegExp(`^${bloque}$`, 'i') };
 
     const skip = (Number(page) - 1) * Number(limit);
 
