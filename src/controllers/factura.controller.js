@@ -799,6 +799,42 @@ const registrarHistoricaLote = async (req, res) => {
   });
 };
 
+// Registers a voided receipt number with no casa, cargos, or value.
+// Used to account for physical invoice numbers that were cancelled before being issued.
+const registrarAnulada = async (req, res) => {
+  const { numeroRecibo, fecha, descripcion } = req.body;
+
+  if (!numeroRecibo?.trim())
+    return res.status(400).json({ message: 'El número de recibo es requerido' });
+  if (!fecha || isNaN(new Date(fecha).getTime()))
+    return res.status(400).json({ message: 'La fecha es requerida y debe tener formato YYYY-MM-DD' });
+
+  try {
+    const duplicado = await Factura.findOne({ numeroRecibo: numeroRecibo.trim() });
+    if (duplicado)
+      return res.status(409).json({ message: 'El número de recibo ya existe' });
+
+    const factura = await Factura.create({
+      numeroRecibo: numeroRecibo.trim(),
+      fecha: new Date(fecha),
+      descripcion: descripcion?.trim() || 'Consecutivo anulado',
+      valor: 0,
+      nombrePagador: 'N/A',
+      metodoPago: 'efectivo',
+      estado: 'por_aprobar',
+      anulado: true,
+      anuladoPor: req.user._id,
+      anuladoEn: new Date(),
+      creadoPor: req.user._id,
+      cargos: [],
+    });
+
+    return res.status(201).json({ message: 'Consecutivo anulado registrado', factura });
+  } catch (error) {
+    return res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
 module.exports = {
   listarFacturas,
   obtenerFactura,
@@ -814,5 +850,6 @@ module.exports = {
   resumenFacturas,
   registrarHistoricaLote,
   registrarAprobadosLote,
+  registrarAnulada,
 };
 
