@@ -23,7 +23,7 @@ const facturaSchema = new mongoose.Schema(
     casa: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Casa',
-      required: true,
+      default: null,
     },
     descripcion: {
       type: String,
