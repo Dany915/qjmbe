@@ -194,10 +194,11 @@ const eliminarFactura = async (req, res) => {
         message: 'Solo se pueden eliminar facturas en estado "por_aprobar" que no estén anuladas',
       });
 
-    // Release linked cargos so they can be used in a new factura
     if (factura.cargos?.length) {
+      // Auto-created cargos are deleted with the factura; pre-existing ones are just released
+      await Cargo.deleteMany({ _id: { $in: factura.cargos }, autoCreado: true });
       await Cargo.updateMany(
-        { _id: { $in: factura.cargos } },
+        { _id: { $in: factura.cargos }, autoCreado: false },
         { $set: { factura: null } }
       );
     }
@@ -579,6 +580,7 @@ const _resolverCargos = async (specs, casaId, fallbackFecha, adminUserId) => {
       monto,
       vencimiento,
       descripcion: descSpec || null,
+      autoCreado: true,
       creadoPor: adminUserId,
       tarifa: tarifaId,
     });
