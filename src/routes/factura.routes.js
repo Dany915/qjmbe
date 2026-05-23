@@ -18,6 +18,7 @@ const {
   registrarHistoricaLote,
   registrarAprobadosLote,
   registrarAnulada,
+  listarEliminadas,
 } = require('../controllers/factura.controller');
 
 const adminOnly = [authenticate, requireRole('admin')];
@@ -72,6 +73,7 @@ router.post('/historica/lote', ...adminOnly, registrarHistoricaLote);
 router.post('/bulk-aprobadas', ...adminOnly, registrarAprobadosLote);
 router.post('/anulada', ...anyActive, registrarAnulada);
 router.put('/:id', ...anyActive, facturaUpdateRules, actualizarFactura);
+router.get('/eliminadas', ...adminOnly, listarEliminadas);
 router.delete('/:id', ...adminOnly, eliminarFactura);
 router.patch('/:id/aprobar', ...adminOnly, aprobarFactura);
 router.patch('/:id/rechazar', ...adminOnly, rechazarFactura);

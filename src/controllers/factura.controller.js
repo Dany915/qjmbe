@@ -4,6 +4,7 @@ const Factura = require('../models/Factura');
 const Casa = require('../models/Casa');
 const Cargo = require('../models/Cargo');
 const Tarifa = require('../models/Tarifa');
+const FacturaEliminada = require('../models/FacturaEliminada');
 
 // bloque + numeroCasa are needed so the 'codigo' virtual (e.g. "G12") is computed
 const populate = [
@@ -189,19 +190,39 @@ const eliminarFactura = async (req, res) => {
     const factura = await Factura.findById(req.params.id);
     if (!factura) return res.status(404).json({ message: 'Factura no encontrada' });
 
-    if (factura.estado !== 'por_aprobar' || factura.anulado)
-      return res.status(403).json({
-        message: 'Solo se pueden eliminar facturas en estado "por_aprobar" que no estén anuladas',
-      });
-
     if (factura.cargos?.length) {
-      // Auto-created cargos are deleted with the factura; pre-existing ones are just released
+      if (factura.estado === 'aprobado') {
+        // Revert paid pre-existing cargos to their unpaid state
+        await Cargo.updateMany(
+          { _id: { $in: factura.cargos }, autoCreado: false },
+          [{ $set: {
+            estado: { $cond: [{ $lt: ['$vencimiento', new Date()] }, 'vencido', 'pendiente'] },
+            factura: null,
+            fechaPago: null,
+          }}]
+        );
+      } else {
+        await Cargo.updateMany(
+          { _id: { $in: factura.cargos }, autoCreado: false },
+          { $set: { factura: null } }
+        );
+      }
       await Cargo.deleteMany({ _id: { $in: factura.cargos }, autoCreado: true });
-      await Cargo.updateMany(
-        { _id: { $in: factura.cargos }, autoCreado: false },
-        { $set: { factura: null } }
-      );
     }
+
+    await FacturaEliminada.create({
+      numeroRecibo: factura.numeroRecibo,
+      fechaOriginal: factura.fecha,
+      valorOriginal: factura.valor,
+      estadoOriginal: factura.estado,
+      anulada: factura.anulado,
+      casa: factura.casa ?? null,
+      descripcion: factura.descripcion ?? null,
+      nombrePagador: factura.nombrePagador ?? null,
+      eliminadoPor: req.user._id,
+      eliminadoEn: new Date(),
+      motivo: req.body?.motivo?.trim() || null,
+    });
 
     await factura.deleteOne();
     return res.json({ message: 'Factura eliminada exitosamente' });
@@ -499,25 +520,31 @@ const resumenFacturas = async (req, res) => {
 
     const filter = buildFacturaFilter({ desde, hasta, estado, anulado, metodoPago, casaIds });
 
-    const [resultado] = await Factura.aggregate([
-      { $match: filter },
-      {
-        $group: {
-          _id: null,
-          total: { $sum: 1 },
-          totalValor: { $sum: '$valor' },
-          totalEfectivo: {
-            $sum: { $cond: [{ $eq: ['$metodoPago', 'efectivo'] }, '$valor', 0] },
-          },
-          totalDigital: {
-            $sum: { $cond: [{ $eq: ['$metodoPago', 'digital'] }, '$valor', 0] },
+    const [agregado, listado] = await Promise.all([
+      Factura.aggregate([
+        { $match: filter },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            totalValor: { $sum: '$valor' },
+            totalEfectivo: {
+              $sum: { $cond: [{ $eq: ['$metodoPago', 'efectivo'] }, '$valor', 0] },
+            },
+            totalDigital: {
+              $sum: { $cond: [{ $eq: ['$metodoPago', 'digital'] }, '$valor', 0] },
+            },
           },
         },
-      },
-      { $project: { _id: 0 } },
+        { $project: { _id: 0 } },
+      ]),
+      Factura.find(filter)
+        .select('numeroRecibo fecha estado anulado -_id')
+        .sort({ fecha: -1 }),
     ]);
 
-    return res.json(resultado ?? { total: 0, totalValor: 0, totalEfectivo: 0, totalDigital: 0 });
+    const resumen = agregado[0] ?? { total: 0, totalValor: 0, totalEfectivo: 0, totalDigital: 0 };
+    return res.json({ ...resumen, facturas: listado });
   } catch (error) {
     return res.status(500).json({ message: 'Server error', error: error.message });
   }
@@ -801,6 +828,28 @@ const registrarHistoricaLote = async (req, res) => {
   });
 };
 
+const listarEliminadas = async (req, res) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+    const skip = (Number(page) - 1) * Number(limit);
+
+    const [registros, total] = await Promise.all([
+      FacturaEliminada.find()
+        .populate('eliminadoPor', 'name email')
+        .populate('casa', 'bloque numeroCasa')
+        .collation({ locale: 'en', numericOrdering: true })
+        .sort({ numeroRecibo: 1 })
+        .skip(skip)
+        .limit(Number(limit)),
+      FacturaEliminada.countDocuments(),
+    ]);
+
+    return res.json({ total, page: Number(page), pages: Math.ceil(total / Number(limit)), registros });
+  } catch (error) {
+    return res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
 // Registers a voided receipt number with no casa, cargos, or value.
 // Used to account for physical invoice numbers that were cancelled before being issued.
 const registrarAnulada = async (req, res) => {
@@ -853,5 +902,6 @@ module.exports = {
   registrarHistoricaLote,
   registrarAprobadosLote,
   registrarAnulada,
+  listarEliminadas,
 };
 
