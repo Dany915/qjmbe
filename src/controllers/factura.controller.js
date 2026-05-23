@@ -199,7 +199,8 @@ const eliminarFactura = async (req, res) => {
             estado: { $cond: [{ $lt: ['$vencimiento', new Date()] }, 'vencido', 'pendiente'] },
             factura: null,
             fechaPago: null,
-          }}]
+          }}],
+          { updatePipeline: true }
         );
       } else {
         await Cargo.updateMany(
