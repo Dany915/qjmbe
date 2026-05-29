@@ -829,6 +829,19 @@ const registrarHistoricaLote = async (req, res) => {
   });
 };
 
+const buscarPorNumeroRecibo = async (req, res) => {
+  try {
+    const factura = await Factura.findOne({ numeroRecibo: req.params.numeroRecibo.trim() }).populate([
+      ...populate,
+      { path: 'anuladoPor', select: 'name email role' },
+    ]);
+    if (!factura) return res.status(404).json({ message: 'Factura no encontrada' });
+    return res.json({ factura });
+  } catch (error) {
+    return res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
 const listarEliminadas = async (req, res) => {
   try {
     const { page = 1, limit = 20 } = req.query;
@@ -904,5 +917,6 @@ module.exports = {
   registrarAprobadosLote,
   registrarAnulada,
   listarEliminadas,
+  buscarPorNumeroRecibo,
 };
 
