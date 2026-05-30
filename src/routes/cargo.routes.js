@@ -12,7 +12,7 @@ const {
 } = require('../controllers/cargo.controller');
 
 const adminOnly = [authenticate, requireRole('admin')];
-const anyActive = [authenticate];
+const anyActive = [authenticate, requireRole('user', 'admin')];
 
 const periodoRule = body('periodo')
   .matches(/^\d{4}-\d{2}$/)

@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
-const ROLES = ['user', 'admin'];
+const ROLES = ['user', 'admin', 'super_admin', 'report_user'];
 const STATUS = ['pending', 'active', 'suspended'];
 const AUTH_PROVIDERS = ['local', 'google'];
 

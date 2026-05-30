@@ -67,6 +67,9 @@ const suspendUser = async (req, res) => {
     if (user._id.equals(req.user._id))
       return res.status(400).json({ message: 'You cannot suspend your own account' });
 
+    if (user.role === 'super_admin')
+      return res.status(403).json({ message: 'No se puede suspender una cuenta de super administrador' });
+
     if (user.status === 'suspended')
       return res.status(400).json({ message: 'User is already suspended' });
 
@@ -93,6 +96,9 @@ const updateRole = async (req, res) => {
     if (user._id.equals(req.user._id))
       return res.status(400).json({ message: 'You cannot change your own role' });
 
+    if (user.role === 'super_admin')
+      return res.status(403).json({ message: 'No se puede modificar el rol de un super administrador' });
+
     user.role = role;
     await user.save();
 
@@ -102,4 +108,29 @@ const updateRole = async (req, res) => {
   }
 };
 
-module.exports = { listUsers, getUser, activateUser, suspendUser, updateRole };
+const resetUserPassword = async (req, res) => {
+  try {
+    const { password } = req.body;
+
+    if (!password || password.length < 6)
+      return res.status(400).json({ message: 'La nueva contraseña debe tener al menos 6 caracteres' });
+
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    if (user.role === 'super_admin')
+      return res.status(403).json({ message: 'No se puede modificar la contraseña de un super administrador' });
+
+    if (user.authProvider === 'google')
+      return res.status(400).json({ message: 'Este usuario inició sesión con Google y no tiene contraseña local' });
+
+    user.password = password;
+    await user.save();
+
+    return res.json({ message: 'Contraseña actualizada exitosamente' });
+  } catch (error) {
+    return res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+module.exports = { listUsers, getUser, activateUser, suspendUser, updateRole, resetUserPassword };

@@ -23,7 +23,9 @@ const {
 } = require('../controllers/factura.controller');
 
 const adminOnly = [authenticate, requireRole('admin')];
-const anyActive = [authenticate]; // user or admin
+const writerOrAbove = [authenticate, requireRole('user', 'admin')]; // excludes report_user
+const reportOrAdmin = [authenticate, requireRole('admin', 'report_user')];
+const anyActive = [authenticate]; // all authenticated roles (read-only endpoints)
 
 const TIPOS_CARGO = ['administracion', 'mora', 'parqueadero', 'retroactivo', 'extraordinario'];
 
@@ -67,14 +69,14 @@ const facturaUpdateRules = [
 router.get('/', ...anyActive, listarFacturas);
 router.get('/buscar', ...anyActive, buscarFacturas);
 router.get('/buscar/resumen', ...anyActive, resumenFacturas);
-router.get('/buscar/exportar', ...adminOnly, exportarFacturas);
+router.get('/buscar/exportar', ...reportOrAdmin, exportarFacturas);
 router.get('/recibo/:numeroRecibo', ...anyActive, buscarPorNumeroRecibo);
 router.get('/:id', ...adminOnly, obtenerFactura);
 router.post('/bulk', ...adminOnly, crearFacturasEnLote);
 router.post('/historica/lote', ...adminOnly, registrarHistoricaLote);
 router.post('/bulk-aprobadas', ...adminOnly, registrarAprobadosLote);
-router.post('/anulada', ...anyActive, registrarAnulada);
-router.put('/:id', ...anyActive, facturaUpdateRules, actualizarFactura);
+router.post('/anulada', ...writerOrAbove, registrarAnulada);
+router.put('/:id', ...writerOrAbove, facturaUpdateRules, actualizarFactura);
 router.get('/eliminadas', ...adminOnly, listarEliminadas);
 router.delete('/:id', ...adminOnly, eliminarFactura);
 router.patch('/:id/aprobar', ...adminOnly, aprobarFactura);
@@ -82,6 +84,6 @@ router.patch('/:id/rechazar', ...adminOnly, rechazarFactura);
 router.patch('/:id/anular', ...adminOnly, anularFactura);
 
 // User and admin can create a single factura
-router.post('/', ...anyActive, facturaRules, crearFactura);
+router.post('/', ...writerOrAbove, facturaRules, crearFactura);
 
 module.exports = router;
