@@ -85,7 +85,7 @@ const suspendUser = async (req, res) => {
 const updateRole = async (req, res) => {
   try {
     const { role } = req.body;
-    const allowed = ['user', 'admin'];
+    const allowed = ['user', 'admin', 'report_user'];
 
     if (!allowed.includes(role))
       return res.status(400).json({ message: `Role must be one of: ${allowed.join(', ')}` });
